@@ -55,6 +55,10 @@ export default defineConfig({
             text: "Self-Repaying Loan Strategy",
             link: "/strategies/self-repaying-loan",
           },
+          {
+            text: "Strategy Composition Guide",
+            link: "/strategies/composition",
+          },
         ],
       },
       {
