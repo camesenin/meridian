@@ -238,7 +238,6 @@ export async function resolveScenarioSources(
     accrualConfig = {
       cashRateAnnual: ratePointDecimal,
       cashRatePerSecond: perSecondRate,
-      fundingRate: { ratePerSecond: perSecondRate },
     };
   } else {
     // Check DeFiLlama pool APY if available
@@ -267,7 +266,6 @@ export async function resolveScenarioSources(
       accrualConfig = {
         cashRateAnnual: annualDecimal,
         cashRatePerSecond: perSecondRate,
-        fundingRate: { ratePerSecond: perSecondRate },
       };
     }
   }

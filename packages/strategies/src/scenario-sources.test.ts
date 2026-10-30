@@ -121,7 +121,9 @@ describe("scenario-sources resolver (#1025)", () => {
     expect(resolved.accrual).toBeDefined();
     expect(resolved.accrual?.cashRateAnnual).toBeDefined();
     expect(resolved.accrual?.cashRatePerSecond).toBeDefined();
-    expect(resolved.accrual?.fundingRate?.ratePerSecond).toBeDefined();
+    // Blend and DeFindex are lending/vault rate sources that accrue cash interest,
+    // not perpetual funding rates, so fundingRate is omitted.
+    expect(resolved.accrual?.fundingRate).toBeUndefined();
 
     // Verify spot price for both assets
     const startTs = Date.parse(scenario.window.start);
@@ -150,6 +152,7 @@ describe("scenario-sources resolver (#1025)", () => {
     expect(resolved.prices).toBeDefined();
     expect(resolved.accrual).toBeDefined();
     expect(resolved.accrual?.cashRateAnnual).toBeDefined();
+    expect(resolved.accrual?.fundingRate).toBeUndefined();
 
     const startTs = Date.parse(scenario.window.start);
     expect(resolved.prices.getSpotPrice("USDC", startTs).toString()).toBe("1");
@@ -217,7 +220,7 @@ describe("scenario-sources resolver (#1025)", () => {
     );
   });
 
-  it("accrues cash interest without truncation for realistic APY rates", async () => {
+  it("accrues positive cash interest without truncation for realistic APY rates", async () => {
     const scenario = parseScenario({
       ...BASE_SCENARIO_INPUT,
       assets: ["USDC"],
@@ -229,22 +232,31 @@ describe("scenario-sources resolver (#1025)", () => {
     });
 
     const clock = scenarioClock(scenario);
-    const strategy = new DeltaNeutralStrategy();
-    const config = scenarioDeltaNeutralConfig(scenario, resolved.prices);
+    // Use an idle strategy holding the initial cash to observe pure cash interest accrual
+    const idleStrategy = {
+      name: "idle-cash",
+      init: () => undefined,
+      step: () => undefined,
+      rebalance: () => [],
+      close: () => [],
+    };
 
     const result = runBacktest({
       clock,
       assets: ["USDC"] as AssetSymbol[],
       prices: resolved.prices,
-      strategy,
-      strategyConfig: config,
+      strategy: idleStrategy,
+      strategyConfig: null,
       initialCash: FixedPointDecimal.fromString(scenario.startingCapital),
       ...(resolved.accrual ? { accrual: resolved.accrual } : {}),
     });
 
-    // 10,000 capital with 5.25% APY over a 4 hour backtest window
-    // must accrue interest without truncating to 0 stroops (formerly truncated to zero)
-    expect(result.totalInterest.toStroops()).not.toBe(0n);
+    // 10,000 idle cash earning 5.25% APY over a 4 hour backtest window
+    // must accrue positive interest (> 0) without truncating to 0 stroops
+    expect(result.totalInterest.toStroops()).toBeGreaterThan(0n);
+    // Since blend is a cash yield source rather than a perpetual funding source,
+    // runner totalFunding is zero
+    expect(result.totalFunding.toStroops()).toBe(0n);
   });
 
   it("fails loudly when declared price source has no data for an asset in window", async () => {
@@ -258,9 +270,25 @@ describe("scenario-sources resolver (#1025)", () => {
       (r) => r.asset !== "EURC"
     );
 
-    await expect(
-      resolveScenarioSources(scenario, { historicalData: rowsWithoutEurc })
-    ).rejects.toThrowError(MissingSourceDataError);
+    let caughtError: unknown;
+    try {
+      await resolveScenarioSources(scenario, {
+        historicalData: rowsWithoutEurc,
+      });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(MissingSourceDataError);
+    const missingErr = caughtError as MissingSourceDataError;
+    // Acceptance criterion: error explicitly names the asset and the window
+    expect(missingErr.asset).toBe("EURC");
+    expect(missingErr.window.start).toBe(scenario.window.start);
+    expect(missingErr.window.end).toBe(scenario.window.end);
+    expect(missingErr.source).toBe("horizon");
+    expect(missingErr.message).toContain("EURC");
+    expect(missingErr.message).toContain(scenario.window.start);
+    expect(missingErr.message).toContain(scenario.window.end);
   });
 
   it("fails loudly when recorded price data does not span the full scenario window", async () => {
@@ -274,9 +302,22 @@ describe("scenario-sources resolver (#1025)", () => {
       (r) => Number(r.timestamp) < Date.parse("2024-01-01T04:00:00Z")
     );
 
-    await expect(
-      resolveScenarioSources(scenario, { historicalData: partialRows })
-    ).rejects.toThrowError(MissingSourceDataError);
+    let caughtError: unknown;
+    try {
+      await resolveScenarioSources(scenario, {
+        historicalData: partialRows,
+      });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(MissingSourceDataError);
+    const missingErr = caughtError as MissingSourceDataError;
+    expect(missingErr.asset).toBe("USDC");
+    expect(missingErr.window.start).toBe(scenario.window.start);
+    expect(missingErr.window.end).toBe(scenario.window.end);
+    expect(missingErr.message).toContain("USDC");
+    expect(missingErr.message).toContain(scenario.window.start);
   });
 
   it("fails loudly when recorded rate series does not span the full scenario window", async () => {
@@ -292,9 +333,20 @@ describe("scenario-sources resolver (#1025)", () => {
           Number(r.timestamp) === Date.parse("2024-01-01T00:00:00Z"))
     );
 
-    await expect(
-      resolveScenarioSources(scenario, { historicalData: partialRows })
-    ).rejects.toThrowError(MissingSourceDataError);
+    let caughtError: unknown;
+    try {
+      await resolveScenarioSources(scenario, {
+        historicalData: partialRows,
+      });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(MissingSourceDataError);
+    const missingErr = caughtError as MissingSourceDataError;
+    expect(missingErr.source).toBe("blend");
+    expect(missingErr.window.start).toBe(scenario.window.start);
+    expect(missingErr.window.end).toBe(scenario.window.end);
   });
 
   it("fails loudly when declared rate source has no data", async () => {
@@ -307,12 +359,21 @@ describe("scenario-sources resolver (#1025)", () => {
       (r) => r.asset !== "defindex"
     );
 
-    await expect(
-      resolveScenarioSources(scenario, {
+    let caughtError: unknown;
+    try {
+      await resolveScenarioSources(scenario, {
         historicalData: rowsWithoutDefindex,
         defiLlamaPools: [],
-      })
-    ).rejects.toThrowError(MissingSourceDataError);
+      });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(MissingSourceDataError);
+    const missingErr = caughtError as MissingSourceDataError;
+    expect(missingErr.source).toBe("defindex");
+    expect(missingErr.window.start).toBe(scenario.window.start);
+    expect(missingErr.window.end).toBe(scenario.window.end);
   });
 
   it("fails loudly when defillama price source only has pool APY/TVL metadata without real price observations", async () => {
@@ -321,9 +382,22 @@ describe("scenario-sources resolver (#1025)", () => {
       assets: ["EURC"],
       source: { price: "defillama", rate: "defindex" },
     });
-    await expect(
-      resolveScenarioSources(scenario, { defiLlamaPools: MOCK_LLAMA_POOLS })
-    ).rejects.toThrowError(MissingSourceDataError);
+
+    let caughtError: unknown;
+    try {
+      await resolveScenarioSources(scenario, {
+        defiLlamaPools: MOCK_LLAMA_POOLS,
+      });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeInstanceOf(MissingSourceDataError);
+    const missingErr = caughtError as MissingSourceDataError;
+    expect(missingErr.asset).toBe("EURC");
+    expect(missingErr.window.start).toBe(scenario.window.start);
+    expect(missingErr.window.end).toBe(scenario.window.end);
+    expect(missingErr.source).toBe("defillama");
   });
 
   it("uses recorded historical stream for defillama if provided in historicalData and respects defiLlamaPools: []", async () => {
@@ -408,9 +482,18 @@ describe("scenario-sources resolver (#1025)", () => {
     );
   });
 
-  it("does not perform network calls at module load time", () => {
-    // If the module had eager side effects, importing it would have triggered network/mocks
-    expect(resolveScenarioSources).toBeInstanceOf(Function);
-    expect(MissingSourceDataError).toBeInstanceOf(Function);
+  it("does not perform network calls at module load time", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy;
+    try {
+      // Dynamic import with cache buster forces fresh module graph load
+      const mod = await import(`./scenario-sources?loadTest=${Date.now()}`);
+      expect(mod.resolveScenarioSources).toBeDefined();
+      expect(mod.MissingSourceDataError).toBeDefined();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
