@@ -271,7 +271,7 @@ describe("scenario-sources resolver (#1025)", () => {
     });
     // Missing end timestamp
     const partialRows = makeHistoricalRows().filter(
-      (r) => r.timestamp < Date.parse("2024-01-01T04:00:00Z")
+      (r) => Number(r.timestamp) < Date.parse("2024-01-01T04:00:00Z")
     );
 
     await expect(
@@ -289,7 +289,7 @@ describe("scenario-sources resolver (#1025)", () => {
       (r) =>
         r.kind === "price" ||
         (r.kind === "rate" &&
-          r.timestamp === Date.parse("2024-01-01T00:00:00Z"))
+          Number(r.timestamp) === Date.parse("2024-01-01T00:00:00Z"))
     );
 
     await expect(
